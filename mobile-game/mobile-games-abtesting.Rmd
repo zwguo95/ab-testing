@@ -1,0 +1,121 @@
+---
+title: "Mobile Games A/B Testing"
+author: "Zhaowen Guo"
+date: ""
+output: html_document
+---
+
+```{r, message=FALSE,echo=FALSE,warning=FALSE}
+library(tidyverse)
+library(psych)
+library(ggplot2)
+```
+
+
+# Overview of Experiment 
+Cookie Cats is a mobile game where as users progress through levels of the game they will occasionally encounter gates that force them to wait a non-trivial amount of time or make an in-app purchase to progress. In this project, we will analyze an A/B test where we moved the first gate from level 30 to level 40 and its impact on user retention. See [here](https://projects.datacamp.com/projects/184) for details. 
+
+To summarize, the goal is to improve user retention and the change is to move the gate from level 30 to level 40. 
+
+# Structure of Experiment 
+
+Assumptions 
+
+* Each experimental unit is independent from each other 
+* Random treatment assignment 
+* The difference between the control and the treatment group should only be explained by the change 
+
+Ingredients 
+
+* Unit of diversion: user id  
+* Unit of analysis: user id  
+* Sample size (reference [here](https://dimewiki.worldbank.org/Power_Calculations))
+
+$$
+N = \frac{4 \sigma^2(Z_{1-\beta} + Z_{1-\alpha/2})^2}{d_{min}^2}
+$$
+
+* Experiment traffic and duration: consider business choices and seasonality 
+
+
+# Explore the Data 
+
+First, we can check the size of the control and the treatment group and see if they have roughly the same number of users. Second, we can check the data distribution to evaluate its skewness. The data is highly right-skewed which indicates that we need to use bootstrapping to evaluate uncertainties of estimates. Third, by looking at the changes in 1-day rentention and 7-day rentention, we detect a slight decrease in the treatment group for both metrics. 
+```{r}
+# check group size of the control and the treatment 
+data <- read.csv("cookie_cats.csv")
+data %>% 
+    group_by(version) %>%
+    summarize(n = n()) 
+```
+
+```{r, warning=FALSE}
+# check the data distribution 
+rounds <- data %>%
+    group_by(sum_gamerounds) %>%
+    summarise(n = n())
+ggplot(rounds, aes(x=sum_gamerounds, y = n)) + 
+    geom_line() + 
+    xlim(0,100) + 
+    theme_bw() + 
+    labs(x = "Game Rounds",y = "Users")
+```
+
+```{r}
+# check differences in retention_1
+data %>%
+    group_by(version) %>%
+    summarise(mean_1 = mean(retention_1))
+```
+
+```{r}
+# check differences in retention_7
+data %>% 
+    group_by(version) %>%
+    summarise(mean_7 = mean(retention_7))
+```
+
+# Boostrapping 
+
+The basic steps to conduct boostrapping are as follows. 
+
+* Create multiple samples of dataset 
+* Compute 1-day rention and 7-day retention for each group
+* Compute difference in rention between two groups 
+* Compute the probability that retentions are greater at the control group
+
+By looking at the boostrapping results, we find that the difference between the control and the treatment group is statistically significant where the change decreases user retention. 
+```{r, warning=FALSE, message=FALSE}
+boots_data <- matrix(nrow = 0, ncol = 2)
+colnames(boots_data) <- c("gate_30","gate_40")
+boots_data <- as_tibble(boots_data)
+
+for (i in 1:200){
+    boots_data[i,] <- data[sample(1:nrow(data), nrow(data), replace = T),] %>% group_by(version) %>% summarise(mean = mean(retention_1)) %>% ungroup() %>% spread(version, mean)
+}
+
+ggplot(boots_data) + 
+    geom_density(aes(x = gate_30), color = "red") + 
+    geom_density(aes(x = gate_40), color = "blue") +
+    theme_bw() + 
+    labs(x = "Estimates", y = "Density")
+```
+
+```{r}
+boots_data$diff = ((boots_data$gate_30 - boots_data$gate_40)/
+    boots_data$gate_40)*100
+mean(boots_data$diff > 0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

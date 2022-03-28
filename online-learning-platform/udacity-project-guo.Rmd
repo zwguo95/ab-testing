@@ -1,0 +1,262 @@
+---
+title: "Udacity A/B Testing Final Project"
+author: "Zhaowen Guo"
+date: ""
+output: html_document
+---
+
+# Overview of Experiment: Free Trial Screener 
+
+This project walks through an A/B test on whether to launch a free trial screener where students will be prompted to answer how much time they can devote to the course before checking out. If fewer than 5 hours per week is indicated, they will see a message about the importance of time commitment. If not, they can proceed to enrollment in the free trial. 
+
+The goal of the experiment is to reduce the number of students who would quit the course during the starting 14 days period without a significant decrease in the number of students who pass the 14 days period. 
+See [here](https://docs.google.com/document/u/1/d/1aCquhIqsUApgsxQ8-SQBAigFDcfWVVohLEXcV6jWbdI/pub) for detailed description. 
+
+# Preparation 
+```{r, echo=FALSE, fig.align='center', fig.cap="User Experience Funnel"}
+knitr::include_graphics("C:\\Users\\Administrator\\Desktop\\user-funnel.png")
+```
+Unit of diversion refers to the unit in the population, and unit of analysis refers to the denominator of the metric. In this experiment, the unit of diversion is a cookie. 
+
+```{r, echo=FALSE, fig.align='center', fig.cap="Roadmap for A/B Testing"}
+knitr::include_graphics("C:\\Users\\Administrator\\Desktop\\roadmap-abtesting.png")
+```
+
+# Metric Choice
+
+We need evaluation metrics to measure the effect of change that is imposed and guardrail metrics for sanity checks and validation of experimental setup. A rule of thumb is to choose at least 2 evaluation metrics and 1 guardrail metric. 
+
+How to choose the evaluation metrics?
+
+* Match the goals of experiments
+* Sensitive enough to pick up the changes 
+* Distinctive enough not to pick up the changes we don't care about
+
+Since the experimental stage is between "Click the Start Free Trial" and "Enroll in the Free Trial", we can set the metrics related to initial cookies and initial clicks to be invariant metrics (number of cookies, number of clicks, and click-through-probability). We are then left with number of user-ids, gross conversion, retention, and net conversion. 
+
+The number of user-ids would be lower in the experimental group, but the reduction could be caused by either the decrease in frustrated students (which we want) or the decrease in students who can actually complete the course (which we don't want). Therefore, this metric is not distinctive.  
+
+Gross conversion, which is number of user-ids to complete enrollment divided by number of cookies to click the "Start Free Trial" button, could be an evaluation metric. We expect this metric to decrease in the experimental group as the number of enrollment will decline. 
+
+Retention, which is the number of user-ids who remain enrolled past the 14-day period divided by the number of user-ids who complete the enrollment, could be an evaluation metric. Since the goal is to reduce the number of frustrated students - the decrease in the number of user-ids who complete the enrollment, we expect this metric to be higher in the experimental group. 
+
+Net conversion, which is the number of user-ids to remain enrolled past the 14-day boundary divided by the number of unique cookies to click the "Start Free Trial" button. The goal is that the screener will not significantly reduce the number of students who eventually complete the course, so we expect to see this metric not to vary much between two groups. 
+
+
+
+# Measure Variability
+
+We need to check the variability (standard deviation) of metrics to determine the sample size and to compute confidence intervals. Since each event is a binary outcome and is independent (whether to click, whether to enroll, whether to pay), we can assume they follow a binomial distribution and the analytical standard deviation could be calculated by the formula below. 
+ 
+$$
+SD = \sqrt{p*(1-p)/N}
+$$
+Assuming a sample size of 5,000 cookies visiting the overview page per day (as given), we can first get the scale factor (1/8 = 5000/40000). For the probabilities, the sampled data will keep the original values and for others we need to multiply the scale factor. 
+
+```{r}
+# gross conversion 
+sd.gc <- sqrt(0.20625 * (1-0.20625) / (3200/8))
+sd.gc
+
+# retention 
+sd.r <- sqrt(0.53 * (1-0.53) / (660/8))
+sd.r
+
+# net conversion 
+sd.nc <- sqrt(0.10931 * (1-0.10931) / (3200/8))
+sd.nc
+```
+
+The analytical estimate of variance will match the empirical estimate of variance only when the unit of diversion is the same as the unit of analysis. In this case, they are the same for Gross Conversion and Net Conversion (both are cookies), but are different for Retention (unit of analysis is user-id but unit of diversion is cookie). Therefore, if we had time we would want to collect an empirical estimate of the variability for Retention.  
+
+# Experiment Size 
+
+When tracking multiple metrics, we need to consider whether to apply the Bonferroni correction. Bonferroni correction helps as it is simple and involves no assumptions, but it can be too conservative as all significance levels must be fixed for each metric. When our metrics show high correlation, it's better not to apply Bonferroni correction since it will be too strict to get passed. In this case, Gross Conversion and Net Conversion are dependent as they both need to capture the click data, we will not use the Bonferroni correction as it is too conservative. 
+
+We can use this [sample size calculator](https://www.evanmiller.org/ab-testing/sample-size.html) to compute the experiment size. We have the practical significance boundary $d_{min}$ and conditional probabilities. Note that we need to double the output as we have two variations/groups and we eventually need to figure out pageviews (transformations of the output may be needed). 
+
+```{r}
+# gross conversion (0.08 is the click-through-probability)
+sz.gc <- 25835 * 2 / 0.08
+sz.gc 
+
+# net conversion
+sz.nc <- 27413 * 2 / 0.08 
+sz.nc
+```
+
+We no longer want to keep Retention as the evaluation metric. The unit of diversion and the unit of analysis are different for Retention which means it has a higher variability and a larger sample size would be required. After computing the sample size to capture any effect on Retention, we get 4,741,212 pageviews which would need almost 119 days to detect the effect. 
+
+# Experiment Duration and Exposure
+
+For the remaining evaluation metrics, net conversion would rule the required sample size. Assume that we divert 80% traffic to this experiment (40% in the control group and 40% in the treatment group), we would need around 22 days. 
+```{r}
+sz.nc / (40000*0.8)
+```
+
+This experiment is considered low risk as we are collecting user behavior data rather than more sensitive information like medical records. Moreover, the experiment requires testing payment behavior after a 14-day period thus running the experiment for 22 days is reasonable. 
+
+# Sanity Checks 
+
+We need to compute 95% confidence intervals for the value we expect to observe and the actual value for each invariant metric, and see whether the observed confidence interval falls into the expected confidence interval. 
+
+For count metrics, we can compute 95% confidence intervals around the fraction of events we expect to be assigned to the control group, and the corresponding observed fraction. 
+
+For proportion metrics, we can construct confidence intervals for the difference in proportions. The pooled standard error can be computed using the following formula, where p is the pooled probability. 
+$$
+SE_{pooled} = \sqrt{p * (1-p) * (1/control + 1/experiment)}
+$$
+
+```{r, message=FALSE, warning=FALSE}
+library(readxl)
+control <- read_excel("results.xlsx", sheet = "Control")
+experiment <- read_excel("results.xlsx", sheet = "Experiment")
+```
+
+Number of cookies
+```{r}
+# actual number of cookies assigned in each group 
+cookies_in_control <- sum(control$Pageviews)
+cookies_in_experiment <- sum(experiment$Pageviews)
+
+# observed fraction in the control group
+observed_cookies_fraction <- cookies_in_control / (cookies_in_control + cookies_in_experiment)
+
+# standard error and margin of error (use z-score=1.96)
+se.cookies <- sqrt(0.5 * (1 - 0.5) / (cookies_in_control + cookies_in_experiment))
+moe.cookies <- 1.96 * se.cookies
+
+# confidence interval 
+observed_cookies_fraction >= 0.5 - moe.cookies &
+    observed_cookies_fraction <= 0.5 + moe.cookies
+```
+
+Number of clicks 
+```{r}
+# actual number of clicks captured in each group
+clicks_in_control <- sum(control$Clicks)
+clicks_in_experiment <- sum(experiment$Clicks)
+
+# observed fraction in the control group
+observed_clicks_fraction <- clicks_in_control / (clicks_in_control + clicks_in_experiment)
+
+# standard error and margin of error 
+se.clicks <- sqrt(0.5 * (1 - 0.5) / (clicks_in_control + clicks_in_experiment))
+moe.clicks <- 1.96 * se.clicks
+
+# confidence interval
+observed_clicks_fraction >= 0.5 - moe.clicks & observed_clicks_fraction <= 0.5 + moe.clicks
+```
+
+Click-through-probability on "Start Free Trial"
+```{r}
+# actual CTP captured in each group
+ctp_control <- clicks_in_control / cookies_in_control
+ctp_experiment <- clicks_in_experiment / cookies_in_experiment
+ctp_diff <- ctp_control - ctp_experiment
+
+# pooled probability 
+pooled_ctp <- (clicks_in_control + clicks_in_experiment) / (cookies_in_control + cookies_in_experiment)
+
+# pooled standard error and margin of error
+se.ctp <- sqrt(pooled_ctp * (1 - pooled_ctp) * (1/cookies_in_control + 1/cookies_in_experiment))
+moe.ctp <- 1.96 * se.ctp 
+
+# confidence interval
+ctp_diff >= 0 - moe.ctp & ctp_diff <= 0 + moe.ctp
+```
+
+All the sanity checks have passed and we can proceed with result analysis. 
+
+
+# Effect Size Tests
+
+We need to check both statistical significance (whether the CI contains 0) and practical significance (whether the CI contains minimum detectable effect). Note that there are NAs in enrollments and payments which makes sense as not all visitors would enroll in or pay for a course. 
+
+
+Gross Conversion is both statistically significant and practically significant. 
+```{r}
+gc_control <- sum(na.omit(control)$Enrollments) / sum(na.omit(control)$Clicks)
+gc_experiment <- sum(na.omit(experiment)$Enrollments) / sum(na.omit(experiment)$Clicks)
+gc_diff <- gc_control - gc_experiment
+
+pooled_gc <- (sum(na.omit(control)$Enrollments) + sum(na.omit(experiment)$Enrollments)) / (sum(na.omit(control)$Clicks) + sum(na.omit(experiment)$Clicks))
+    
+se.gc <- sqrt(pooled_gc * (1 - pooled_gc) * (1/sum(na.omit(control$Clicks)) + 1/sum(na.omit(experiment)$Clicks)))
+moe.gc <- 1.96 * se.gc
+
+gc_diff >= 0 - moe.gc & gc_diff <= 0 + moe.gc
+gc_diff >= 0.01 - moe.gc & gc_diff <= 0.01 + moe.gc
+```
+
+We can also use bootrapping to confirm this as 0 is out of the CI boundary. Note that the confidence interval bounds are defined as alpha/2 and 1-alpha/2 quantiles of the bootstrap distribution. 
+```{r}
+library(parallel)
+experiment.gc <- experiment$Enrollments/experiment$Clicks
+experiment.gc <- experiment.gc[!is.na(experiment.gc)]
+control.gc <- control$Enrollments / control$Clicks
+control.gc <- control.gc[!is.na(control.gc)]
+diff.gc <- experiment.gc - control.gc
+
+gc_vector <- vector(length = 1000)
+gc_parallel <- mclapply(X = 1:1000, FUN = function(i){
+    resample <- sample(diff.gc,
+                       size = length(diff.gc),
+                       replace = TRUE)
+    gc_vector[i] <- mean(resample)
+})
+
+gc_parallel <- sort(unlist(gc_parallel), decreasing = FALSE)
+lower.gc <- gc_parallel[1000*0.05/2] # -0.03
+upper.gc <- gc_parallel[1000*(1-0.05/2)] # -0.01
+```
+
+
+
+Net Conversion is neither statistically significant nor practically significant. 
+```{r}
+nc_control <- sum(na.omit(control)$Payments) / sum(na.omit(control)$Clicks)
+nc_experiment <- sum(na.omit(experiment)$Payments) / sum(na.omit(experiment)$Clicks)
+nc_diff <- nc_control - nc_experiment
+
+pooled_nc <- (sum(na.omit(control)$Payments) + sum(na.omit(experiment)$Payments)) / (sum(na.omit(control)$Clicks) + sum(na.omit(experiment)$Clicks))
+
+se.nc <- sqrt(pooled_nc * (1 - pooled_nc) * (1/sum(na.omit(control)$Clicks)) + 1/sum(na.omit(experiment)$Clicks))
+moe.nc <- 1.96 * se.nc 
+
+nc_diff >= 0 - moe.nc & nc_diff <= 0 + moe.nc
+nc_diff >= 0.0075 - moe.nc & nc_diff <= 0.0075 + moe.nc
+```
+
+# Sign Tests
+For each evaluation metric, we will do a sign test using day-by-day breakdown. We find no discrepancies between effect size hypotheses and sign tests. 
+
+For Gross Conversion, there are 4 days when the data in the experiment group exceed those in the control group. This means we have 4 "successes" out of 23 "trials", which yields the two-tail p-value of 0.0026 (assuming the probability of success in each trial is 0.5). Since 0.0026 is smaller than 0.5 (alpha), this change is statistically significant. 
+```{r}
+binom.test(4,23)
+```
+
+For Net Conversion, we have the two-tail p-value of 0.6776 which means the chance of observing either 10 or fewer successes or 13 or more successes out of 23 trials. This value is larger than 0.5 and this change is not statistically significant. 
+```{r}
+binom.test(10, 23)
+```
+
+# Recommendation
+
+I suggest that Udacity not launch this new feature. 
+
+Recall that we have two goals for this experiment: (1) to reduce the number of frustrated students who left the free trial and (2) to avoid a significant decline in the number of students who continue to enroll and complete the course. 
+
+The Gross Conversion metric is statistically and practically significant, which means the first goal is satisfied as we already saw a significant reduction in the number of students who enrolled in the free trial in the experiment group. 
+
+However, the confidence interval for the Net Conversion metric contains 0 which means this feature could result in either an increase or a decrease in net conversion.  
+
+# Follow-up Experiment
+
+To redudce the number of frustrated students who cancel early in the course, we can consider a follow-up experiment which adds a prompt when students click the "End Free Trial" button. The prompt will ask whether they find the course too difficult to follow given that perceived difficulty of course materials could be another reason to make students frustrated. If they answer yes, they would be redirected to plausible solutions such as getting help from a mentor or other students. If they answer no, they will proceed to cancel the trial. 
+
+The unit of diversion is user-id as we will be tracking students who already start the course. The goal is to reduce the number of frustrated students who leave the free trial in the halfway so as to increase the number of students who at least make one payment. 
+
+The invariant metrics could be user-ids, and the evaluation metrics could be Retention and Net Conversion. 
+
+
