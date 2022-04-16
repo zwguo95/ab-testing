@@ -1,0 +1,308 @@
+---
+title: "Customer Analytics and A/B Testing"
+author: "Zhaowen Guo"
+output: html_document
+---
+
+## Identifying and understanding KPIs
+
+Goal - comparing KPIs
+
+* Goal: Examine the KPI "user conversion rate" after the free trial.
+* Week One Conversion Rate: Limit to users who convert in their first week after the trial ends.
+
+How to choose KPI metrics?
+
+* How long does it take to determine? 
+    * Monthly Conversion Rate implies one-month wait time
+* Leverage exploratory data analysis
+    * Reveals relationship between metrics and key results 
+* Business goals
+
+Understand conversion rate
+
+* Maximum lapse date (date the trial ends for a given user)
+* Restrict users by lapse date
+* Restrict users by cohort 
+* Formula: conversion rate = # total subscriptions / # total users
+```{r, message=FALSE}
+library(zoo) 
+library(pracma)
+library(kableExtra)
+library(tidyverse)
+customer <- read.csv("data/user_demographics_v1.csv", stringsAsFactors = F)
+purchase <- read.csv("data/purchase_data_v1.csv", stringsAsFactors = F)
+revenue <- read.csv("data/daily_revenue.csv", stringsAsFactors = F)
+paywall <- read.csv("data/user_demographics_paywall.csv", stringsAsFactors = F)
+abtesting <- read.csv("data/AB_testing_exercise.csv", stringsAsFactors = F)
+```
+
+```{r}
+purchase <- purchase %>%
+    inner_join(customer, by = "uid") 
+```
+
+```{r, message=FALSE}
+purchase %>%
+    group_by(gender, device) %>%
+    summarise(mean.price = mean(price),
+              median.price = median(price)) %>%
+    ungroup() %>%
+    kable(col.names = c("Gender","Device","Mean","Median"))
+```
+
+
+```{r}
+# compute KPI
+current_date <- as.Date("2018-03-17")
+max_purchase_date <- current_date - 28
+
+# filter to purchases within the first 28 days of registration (convert within a month)
+purchase$reg_date <- as.Date(purchase$reg_date)
+purchase$date <- as.Date(purchase$date)
+purchase_conversion <- purchase %>%
+    filter(reg_date < max_purchase_date) %>%
+    filter(date <= reg_date+28)
+mean(purchase_conversion$price)
+```
+```{r,message=FALSE}
+# average purchase by cohort 
+max_reg_date <- current_date - 28
+purchase_group <- purchase %>%
+    filter(reg_date < max_reg_date) %>%
+    filter(date < reg_date + 28) %>%
+    group_by(gender, device) %>%
+    summarise(mean.price = mean(price),
+              median.price = median(price)) %>%
+    ungroup() %>%
+    kable(col.names = c("Gender","device","Mean","Median"))
+purchase_group
+```
+
+## Exploring Customer Behavior
+
+Concepts in time series data 
+
+* Seasonality: trends following the day of the week
+    * Potentially more likely to subscribe on the weekend
+    * Seasonality may hide larger trends
+* Correcting seasonality
+    * Trailing average: smoothing technique that averages over a lagging window 
+        * Reveal hidden trends by smoothing out seasonality
+        * Average across the period of seasonality 
+        * 7-day window to smooth weekly seasonality 
+        * Average out day-level effects to produce the average week effect
+    * Exponential moving average: weighted moving average 
+        * Weights more recent items in the window more
+        * Applies weights according to an exponential distribution
+        * Averages back to a central trend without masking any recent movements 
+
+```{r}
+revenue$date <- as.Date(revenue$date)
+revenue_daily <- revenue %>%
+    group_by(date) %>%
+    summarise(sum.revenue = sum(revenue))
+
+ggplot(revenue_daily, aes(x=date,y=sum.revenue)) + 
+    geom_line() + 
+    theme_bw() + 
+    labs(x="Date",y="Revenue")
+```
+
+```{r,message=FALSE,warning=FALSE}
+revenue_daily <- revenue_daily %>%
+    mutate(week = rollmean(sum.revenue, k=7, fill = NA),
+           month = rollmean(sum.revenue, k=28, fill = NA),
+           year = rollmean(sum.revenue, k=365, fill = NA))
+
+revenue_compare <- revenue_daily %>%
+    pivot_longer(names_to = "rolling_mean_key",
+                 values_to = "rolling_mean_value",
+                 cols = c(week, month, year))
+
+ggplot(revenue_compare, aes(x=date, 
+                            y = rolling_mean_value,
+                            color = rolling_mean_key)) + 
+    geom_line() + 
+    theme_bw() +
+    labs(x="Date", y="Revenue") + 
+    scale_color_discrete(name = "Moving Average")
+```
+
+```{r}
+# choose the span
+revenue_daily <- revenue_daily %>%
+    mutate(small = movavg(sum.revenue, 10, type = "e"),
+           medium = movavg(sum.revenue, 100, type = "e"),
+           large = movavg(sum.revenue, 500, type = "e"))
+
+era_compare <- revenue_daily %>%
+    pivot_longer(names_to = "era_key",
+                 values_to = "era_value",
+                 cols = c(small, medium, large))
+
+ggplot(era_compare, aes(x=date, 
+                        y = era_value,
+                        color = era_key)) + 
+    geom_line() + 
+    theme_bw() +
+    labs(x="Date", y="Revenue") + 
+    scale_color_discrete(name = "Exponential Rolling Average")
+```
+
+```{r, message=FALSE}
+revenue$date.month <- format(revenue$date, "%Y-%m")
+revenue_group <- revenue %>%
+    group_by(date.month, device, gender) %>%
+    summarise(revenue = sum(revenue)) %>%
+    kable(col.names = c("Month","Device","Gender","Revenue"))
+```
+
+## The Design and Application of A/B Testing 
+
+Concepts of A/B testing 
+
+* Response variable 
+    * Either a KPI or related to a KPI
+* Factors & variants
+    * Facotrs: the type of variable you are changing (i.e. the paywall color)
+    * Variants: particular changes you are testing (i.e. a red versus blue paywall)
+* Experimental unit
+    * The smallest unit you are measuring the change over (i.e. individual users; user-days)
+* Test sensitivity 
+    * What size of impact is meaningful to detect?
+    * Sensitivity: the minimum level of change we want to detect in the test 
+        Try out different values (i.e. 1%, 10% lift in revenue per user)
+* Data variability
+    * Does the amount spent vary a lot among users? If not, then it will be easier to detect a change
+    * Good to contextualize standard deviataion by computing mean/standard deviation
+* Formulas 
+    * Statistical power: probability of finding a statistically significant result when the Null hypothesis is false 
+        * The bigger the sample size, the larger the power
+        * The bigger the confidence interval, the smaller the power
+    * Confidence level: probability of not making Type I error (higher the value, larger test sample needed)
+    * Test sensitivity
+    * P-value: probability of obtaining an effect at least as extreme as the one in the sample, given that the null            hypothesis is true
+
+```{r}
+get_power <- function(n, p1, p2, ci){
+    alpha = 1-ci
+    qu = qnorm(1-alpha/2) # given an area, find the boundary value that determines this area
+    diff = abs(p2 - p1)
+    bp = (p1+p2)/2
+    
+    v1 = p1*(1-p1)
+    v2 = p2*(1-p2)
+    bv = bp*(1-bp)
+    
+    power_part_one = pnorm((n^0.5 * diff - qu * (2 * bv)^0.5) / (v1+v2)^0.5)
+    power_part_two = 1 - pnorm((n^0.5 * diff + qu * (2 * bv)^0.5) / (v1+v2)^0.5)
+    
+    power = power_part_one + power_part_two
+    return(power)
+}
+```
+
+```{r}
+get_power(1000, 0.1, 0.12, 0.95)   #  0.29808032538146
+get_power(2000, 0.1, 0.12, 0.95)   #  0.524515256115834
+get_power(1000, 0.1, 0.12, 0.8)    #  0.5621010118690234
+```
+```{r}
+get_sample_size <- function(power, p1, p2, ci, max_n=1000000){
+    n=1
+    while (n <= max_n) {
+        tmp_power = get_power(n, p1, p2, ci)
+        if (tmp_power >= power){
+            return(n)
+        } else {
+            n = n+100
+        }
+    }
+    return("Increase Max N Value")
+}
+```
+
+```{r}
+# Trial 1
+conversion_rate = 0.03
+power = 0.8
+ci = 0.9
+lift = 0.1
+conversion_rate_p2 = conversion_rate * (1 + lift)
+get_sample_size(power, conversion_rate, conversion_rate_p2, ci) # 42001
+
+# Trial 2
+conversion_rate = 0.03
+power = 0.95
+ci = 0.9
+lift = 0.1
+conversion_rate_p2 = conversion_rate * (1 + lift)
+get_sample_size(power, conversion_rate, conversion_rate_p2, ci) # 73401
+```
+
+
+## Analyzing AB Testing Results 
+
+Steps to take
+
+* Check the group sizes 
+* Check if groups have similar demographics
+* Check if the result is statistically significant
+
+```{r}
+get_pvalue <- function(con_conv, test_conv, con_size, test_size){
+    lift = -abs(test_conv - con_conv)
+    scale_one = con_conv * (1-con_conv) * (1/con_size)
+    scale_two = test_conv * (1-test_conv) * (1/test_size)
+    scale_val = (scale_one + scale_two)^0.5
+    p_value = 2 * pnorm(lift, 0, scale_val)
+    return(p_value)
+}
+```
+
+```{r}
+# Trial 1
+con_conv = 0.034351
+test_conv = 0.041984
+con_size = 48236
+test_size = 49867
+get_pvalue(con_conv, test_conv, con_size, test_size)   # 4.257297485586909e-10
+
+# Trial 2
+con_conv = 0.034351
+test_conv = 0.041984
+con_size = 48
+test_size = 49
+get_pvalue(con_conv, test_conv, con_size, test_size)  # 0.8443
+```
+```{r}
+get_ci <- function(lift, alpha, sd){
+    val = abs(qnorm((1-alpha)/2))
+    lower = lift - val * sd
+    upper = lift + val * sd
+    return(list(lower, upper))
+}
+```
+
+```{r}
+# Trial 1
+test_conv = 0.102005
+con_conv = 0.090965
+test_size = 56350
+con_size = 58583
+lift_mean = test_conv - con_conv
+lift_variance = (1 - test_conv) * test_conv / test_size + (1 - con_conv) * con_conv / con_size
+lift_sd = lift_variance^0.5
+get_ci(lift_mean, 0.95, lift_sd) # (0.007624337671217316, 0.014455662328782672)
+
+# Trial 2
+test_conv = 0.102005
+con_conv = 0.090965
+test_size = 563
+con_size = 585
+lift_mean = test_conv - con_conv
+lift_variance = (1 - test_conv) * test_conv / test_size + (1 - con_conv) * con_conv / con_size
+lift_sd = lift_variance**0.5
+get_ci(lift_mean, 0.95, lift_sd) # (-0.023135997406420666, 0.045215997406420655)
+```
